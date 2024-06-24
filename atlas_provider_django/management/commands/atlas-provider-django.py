@@ -11,6 +11,15 @@ from django.core.management.commands.sqlmigrate import Command as SqlMigrateComm
 from django.db.backends.sqlite3.base import DatabaseWrapper as Sqlite3DatabaseWrapper
 from django.db.backends.sqlite3.schema import DatabaseSchemaEditor as SqliteSchemaEditor
 
+from django_multitenant.backends.postgresql.base import (
+    DatabaseWrapper as MultitenantDatabaseWrapper,
+    TenantDatabaseFeatures,
+    DatabaseSchemaEditor as MultitenantDatabaseSchemaEditor,
+)
+
+from django.db.backends.postgresql.base import DatabaseWrapper as PGDatabaseWrapper
+from django.db.backends.postgresql.schema import DatabaseSchemaEditor as PGDatabaseSchemaEditor
+
 from atlas_provider_django.management.commands.migrations import get_migrations
 
 
@@ -20,12 +29,13 @@ class Dialect(str, Enum):
     sqlite = "sqlite"
     postgresql = "postgresql"
     mssql = "mssql"
+    multitenant = "multitenant"
 
     def __str__(self):
         return self.value
 
 
-current_dialect = Dialect.mysql
+current_dialect = Dialect.multitenant
 
 
 class MockSqliteSchemaEditor(SqliteSchemaEditor):
@@ -40,6 +50,20 @@ class MockSqliteSchemaEditor(SqliteSchemaEditor):
         # Running the __exit__ method of the grandparent class.
         return super(SqliteSchemaEditor, self).__exit__(exc_type, exc_value, traceback)
 
+class MockMultitenantSchemaEditor(MultitenantDatabaseSchemaEditor):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def execute(self, sql, params=()):
+        return super(PGDatabaseSchemaEditor, self).execute(sql, params)
+
+class MockPGDatabaseSchemaEditor(PGDatabaseSchemaEditor):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def execute(self, sql, params=()):
+        return super(PGDatabaseSchemaEditor, self).execute(sql, params)
+
 
 # Returns the database connection wrapper for the given dialect.
 # Mocks some methods in order to get the sql statements without db connection.
@@ -52,20 +76,16 @@ def get_connection_by_dialect(dialect):
             }, "sqlite3")
             conn.SchemaEditorClass = MockSqliteSchemaEditor
         case Dialect.postgresql:
-            from django.db.backends.postgresql.base import DatabaseWrapper as PGDatabaseWrapper
-            from django.db.backends.postgresql.schema import DatabaseSchemaEditor as PGDatabaseSchemaEditor
-
-            class MockPGDatabaseSchemaEditor(PGDatabaseSchemaEditor):
-                def __init__(self, *args, **kwargs):
-                    super().__init__(*args, **kwargs)
-
-                def execute(self, sql, params=()):
-                    return super(PGDatabaseSchemaEditor, self).execute(sql, params)
-
             conn = PGDatabaseWrapper({
                 "ENGINE": "django.db.backends.postgresql",
             }, "postgresql")
             conn.SchemaEditorClass = MockPGDatabaseSchemaEditor
+        case Dialect.multitenant:
+            conn = MultitenantDatabaseWrapper({
+                "ENGINE": "django_multitenant.backends.postgresql",
+            }, "postgresql")
+            conn.SchemaEditorClass = MockMultitenantSchemaEditor
+            conn.features = TenantDatabaseFeatures
         case Dialect.mysql:
             from django.db.backends.mysql.base import DatabaseWrapper as MySQLDatabaseWrapper
             from django.db.backends.mysql.schema import DatabaseSchemaEditor as MySQLDatabaseSchemaEditor
@@ -220,15 +240,15 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument("--dialect", type=Dialect, choices=list(Dialect),
-                            help="The database dialect to use, Default: mysql",
-                            default=Dialect.mysql)
+                            help="The database dialect to use, Default: multitenant",
+                            default=Dialect.multitenant)
         parser.add_argument("--apps", nargs="+", help="List of apps to get ddl for.")
 
     SqlMigrateCommand.handle = mock_handle
 
     def handle(self, *args, **options):
         global current_dialect
-        current_dialect = options.get("dialect", Dialect.sqlite)
+        current_dialect = options.get("dialect", Dialect.multitenant)
         selected_apps = options.get("apps", None)
         return self.get_ddl(selected_apps)
 
